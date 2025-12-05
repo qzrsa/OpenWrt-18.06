@@ -1,7 +1,7 @@
 name: build x86/64 openwrt
 
 on:
-  # 定时/Watch 触发如需可自行恢复
+  # 如需定时/Watch 触发可解开
   # schedule:
   #   - cron: '30 14 */3 * *'
   # watch:
@@ -39,7 +39,7 @@ on:
       toolchain:
         description: '使用toolchain缓存（首次建议关掉，后续再开）'
         required: false
-        default: false     # 原来是 true，先改为 false，避免旧缓存引起 GLIBC 冲突
+        default: false          # 先不用旧缓存，避免 GLIBC 冲突
         type: boolean
       zsh_tool:
         description: '预设zsh终端工具'
@@ -57,7 +57,7 @@ on:
         default: true
         type: boolean
 
-# 关键：允许 Actions 创建/更新 Release、上传 asset
+# 允许创建/更新 Release、上传资产
 permissions:
   contents: write
 
@@ -67,7 +67,7 @@ jobs:
     name: build ${{ github.event.inputs.target }} ${{ github.event.inputs.source }}
 
     env:
-      # 自定义输入
+      # 用户输入
       DEFAULT_IP: ${{ github.event.inputs.ip }}
       PART_SIZE: ${{ github.event.inputs.partsize }}
       TOOLCHAIN: ${{ github.event.inputs.toolchain }}
@@ -79,8 +79,8 @@ jobs:
 
       # Toolchain 相关
       TOOLCHAIN_TAG: toolchain
-      REBUILD_TOOLCHAIN: true      # 强制在当前 Runner 上重建一次工具链
-      OUTPUT_RELEASE: true         # 允许上传 toolchain 缓存到 Release
+      REBUILD_TOOLCHAIN: true       # 本次要重建一次工具链
+      OUTPUT_RELEASE: true
 
       # 其它
       UPLOAD_BIN_DIR: false
@@ -95,18 +95,21 @@ jobs:
           echo "警告⚠"
           echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
           echo -e "已知CPU型号(降序): 7763，8370C，8272CL，8171M，E5-2673\n"
+
           echo "==========================CPU信息=========================="
           echo "CPU物理数量: $(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
           echo "CPU线程数量: $(nproc)"
           echo -e "CPU型号信息:$(cat /proc/cpuinfo | grep -m1 name | awk -F: '{print $2}')\n"
+
           echo "==========================内存信息=========================="
           echo "已安装内存详细信息:"
           echo -e "$(sudo lshw -short -C memory | grep GiB)\n"
+
           echo "==========================硬盘信息=========================="
           echo "硬盘数量: $(ls /dev/sd* | grep -v [1-9] | wc -l)"
           df -hT
 
-      # 如需极致腾盘，可恢复这个步骤
+      # 如需极限腾盘可开启
       # - name: Free Disk Space
       #   if: github.event.inputs.free_disk == 'true'
       #   uses: jlumbroso/free-disk-space@main
@@ -151,6 +154,7 @@ jobs:
 
           sudo vgcreate actions $MNT_NAME $ROOT_NAME
           sudo lvcreate -n disk -l 100%FREE actions
+
           LV_NAME=$(sudo lvscan | awk -F "'" '{print $2}')
           sudo mkfs.btrfs -L combinedisk $LV_NAME
           sudo mkdir -p /workdir
@@ -158,18 +162,23 @@ jobs:
           sudo chown -R runner:runner /workdir
           df -hT
 
+      # 第一次执行 DIY：只拉源码/配置，不打包工具链
       - name: Load Compile Script
+        env:
+          REBUILD_TOOLCHAIN: "false"     # 覆盖全局，避免一上来就打包
         run: |
           chmod +x $DIY_SCRIPT
           ./$DIY_SCRIPT
 
+      # 编译工具链 + 第二次执行 DIY 打包缓存
       - name: Compile Toolchain
         if: env.REBUILD_TOOLCHAIN == 'true'
         id: toolchain
         run: |
           cd $OPENWRT_PATH
           FORCE=1 make toolchain/compile -j$(nproc) || FORCE=1 make toolchain/compile -j1 V=s
-          $GITHUB_WORKSPACE/$DIY_SCRIPT
+          # 这次只用于打包 staging_dir 为缓存
+          REBUILD_TOOLCHAIN=true $GITHUB_WORKSPACE/$DIY_SCRIPT
 
       - name: Delete Old Toolchain
         if: steps.toolchain.conclusion == 'success' || env.OUTPUT_RELEASE == 'true'
@@ -195,7 +204,6 @@ jobs:
       - name: Download DL Package
         run: |
           cd $OPENWRT_PATH
-          # 官方推荐 package/download 即可
           make package/download -j$(nproc)
           find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
